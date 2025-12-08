@@ -1,32 +1,14 @@
 substitutions:
-  name: "core300s"
+  name: "levoit-air-purifier"
   upper_name: Core300s
+  filterReplaceBelowPercent: 5
 
 esphome:
   name: ${name}
   project: 
     name: "Levoit.Core300s"
-    version: "2.0.0"
-  on_boot:
-    priority: 250
-    then:
-      - delay: 60s
-      - lambda: |-
-          id(ble_tracker).set_scan_continuous(true); 
-          id(ble_tracker).start_scan();    
-    
-esp32_ble_tracker:
-  id: ble_tracker
-  scan_parameters:
-    active: true
-    continuous: false
-    # interval: 211ms
-    # window: 120ms
-    # interval: 1100ms
-    # window: 1100ms
-
-bluetooth_proxy:
-  active: true
+    version: "2.1.0"
+ 
 esp32:
   board: esp32dev
   framework:
@@ -40,21 +22,19 @@ logger:
 # Enable Home Assistant API
 api:
   encryption:
-    key: "HbhxCiVHXkCbso1gE9dEOVtickKZr0F9snENSHwlIYc="
-    
+    key: !secret api_key
+
 ota:
-  password: !secret esp_home_ota_pw
-  platform: esphome
+  - platform: esphome
+    password: !secret ota_password
 
 wifi:
-  ssid: !secret wifi_ssid
-  password: !secret wifi_password
-  
-  # Optional manual IP
-  manual_ip:
-    static_ip: 192.168.0.195
-    gateway: 192.168.0.9
-    subnet: 255.255.255.0
+  networks:
+    - ssid: !secret wifi_ssid
+      password: !secret wifi_password
+  ap:
+    ssid: "Levoit-Core300S Fallback Hotspot"
+    password: !secret wifi_ap_password
 
 # Sync time with Home Assistant.
 time:
@@ -75,6 +55,7 @@ uart:
       number: GPIO16
       inverted: false
     baud_rate: 115200
+    #needs to be on? do not dissable!
     debug:
       direction: BOTH
       after:
@@ -91,17 +72,53 @@ sensor:
   - platform: wifi_signal
     name: ${upper_name} WiFi Signal
     update_interval: 60s
+  - platform: template
+    name: "${upper_name} avg CFM/min"
+    entity_category:  diagnostic
+    accuracy_decimals: 1
+    lambda: |-
+      int rtMin = (int)id(run_time_min);
+      int cfmMin = (int)id(cfm_min_used);
+      if(rtMin==0 ||cfmMin ==0) return 0.0;
+      return cfmMin/rtMin;
+    update_interval: 60s
+  - platform: template
+    name: "${upper_name} filter"
+    accuracy_decimals: 1
+    id: filter_life_left
+    device_class: battery
+    unit_of_measurement: '%'
+    lambda: |-
+      int cfmMin = id(cfm_min_used);
+      if(cfmMin==0) return 1.0;
+      int maxMonths = (int)id(max_filter_months).state;
+      int maxCFMMin = maxMonths*30*60*24*141; 
+      float percent = (1 - ((float)min(cfmMin,maxCFMMin)/maxCFMMin))*100;
+      //ESP_LOGI("main", "Percent [%f] max: [%d] current: [%d]  ", percent,maxCFMMin,cfmMin);
+      return percent;
+    update_interval: 5s
 
 text_sensor:
   # Expose WiFi information as sensors.
   - platform: wifi_info
     ip_address:
       name: ${upper_name} IP
+  - platform: template
+    name: ${upper_name} runtime
+    entity_category:  diagnostic
+    lambda: |-
+      int rtMin = (int)id(run_time_min) % 60;
+      int rtHours = (int)id(run_time_min) / 60;
+      char buffer[16];
+      snprintf(buffer, sizeof(buffer), "%dh %dm", rtHours, rtMin);
+      return {std::string(buffer)};
+    update_interval: 5s 
+
 
 core300s:  
   id: core300s_ID
   uart_id: uart_mcu2esp
-  update_interval: 5s
+  update_interval: 3s
   pm25:
     name: ${upper_name} PM25
     icon: mdi:air-filter
@@ -110,14 +127,23 @@ core300s:
       - lambda: |-
           if (x < 6) return 0;
           return x;
-  room_size:
-    name: ${upper_name} Room Size
-    icon: mdi:axis-arrow
   fan_speed:
     name: ${upper_name} Fan Speed
     icon: mdi:fan
+    id: fan_speed
+    internal: true 
+    on_value:
+      - script.execute: map_to_template
+  room_size:
+    name: ${upper_name} Room Size
+    icon: mdi:axis-arrow
+    internal: true
   power:
     name: ${upper_name} Power
+    id: fan_power
+    internal: true 
+    on_value:
+      - script.execute: map_to_template
   mcu_version:
     name: ${upper_name} MCU Version
     icon: mdi:select-inverse    
@@ -125,107 +151,289 @@ core300s:
   fan_mode:
     name: ${upper_name} Fan Mode
     icon: mdi:fan
+    internal: true
+    id: fan_mode
+    on_value:
+      - script.execute: map_to_template
   display_lit:
     name: ${upper_name} Display Lit
+    internal: true
+    id: display_light_on 
     icon: mdi:lightbulb-on-50    
+    on_value:
+      - lambda: |-
+          if (id(display_light_on).state == "On") {
+            id(template_display_lit).publish_state(true);
+          } else {
+            id(template_display_lit).publish_state(false);
+          }
   display_locked:
     name: ${upper_name} Display Lock
     icon: mdi:lock
+    id: display_locked 
+    internal: true 
+    on_value:
+      - lambda: |-
+          if (id(display_locked).state == "Locked") {
+            id(template_display_locked).publish_state(true);
+          } else {
+            id(template_display_locked).publish_state(false);
+          }
   fan_auto_mode:
     name: ${upper_name} Fan Auto Mode
+    id: fan_auto_mode
+    internal: true 
     icon: mdi:fan-auto    
 
 button:
   - platform: restart
     name: ${upper_name} Restart
   - platform: template
-    name: "Power On"
+    name: "${upper_name} Reset filter"
+    entity_category: CONFIG 
     on_press:
-      lambda: id(core300s_ID)->power_on();
+      - globals.set:
+          id: cfm_min_used
+          value: '0'
+      - globals.set:
+          id: run_time_min
+          value: '0'
+globals:
+  - id: cfm_min_used
+    type: int
+    restore_value: yes
+    initial_value: '0'
+  - id: run_time_min
+    type: int
+    restore_value: yes
+    initial_value: '0'
+select:
   - platform: template
-    name: "Power Off"
-    on_press:
-      lambda: id(core300s_ID)->power_off();   
+    name: "${upper_name} Auto Mode"
+    id: auto_mode_select
+    entity_category:  config
+    options:
+      - Default
+      - Quiet
+      - Room Size
+    update_interval: 5s
+    lambda: !lambda |-
+      auto fam = id(fan_auto_mode).state;
+      if(fam=="Unknown" || fam=="") return std::string("Default");
+      return (id(fan_auto_mode).state);
+    set_action:
+      - if:
+          condition:
+            lambda: |-
+              return strcmp(id(fan_auto_mode).state.c_str(),x.c_str()) != 0;
+          then:
+            - lambda: |-
+                if(x=="Default"){
+                  id(core300s_ID)->set_fan_auto_ppm();  
+                }
+                if(x=="Quiet"){
+                  id(core300s_ID)->set_fan_auto_ppmQuiet();   
+                }
+                if(x=="Room Size"){
+                  id(core300s_ID)->set_fan_auto_area(); 
+                }
+number:
   - platform: template
-    name: "Set Fan Manual High"
-    on_press:
-      lambda: id(core300s_ID)->set_fan_manual_high();
-  - platform: template
-    name: "Set Fan Manual Medium"
-    on_press:
-      lambda: id(core300s_ID)->set_fan_manual_medium();   
-  - platform: template
-    name: "Set Fan Manual Low"
-    on_press:
-      lambda: id(core300s_ID)->set_fan_manual_low();  
-  - platform: template
-    name: "Set Fan Mode Manual"
-    on_press:
-      lambda: id(core300s_ID)->set_fan_mode_manual();
-  - platform: template
-    name: "Set Fan Mode Sleep"
-    on_press:
-      lambda: id(core300s_ID)->set_fan_mode_sleep();
-  - platform: template
-    name: "Set Fan Mode Auto"
-    on_press:
-      lambda: id(core300s_ID)->set_fan_mode_auto();               
-  - platform: template
-    name: "Lock Display"
-    on_press:
-      lambda: id(core300s_ID)->lock_display();  
-  - platform: template
-    name: "Unlock Display"
-    on_press:
-      lambda: id(core300s_ID)->unlock_display();
-  - platform: template
-    name: "Display On"
-    on_press:
-      lambda: id(core300s_ID)->display_on();   
-  - platform: template
-    name: "Display Off"
-    on_press:
-      lambda: id(core300s_ID)->display_off();  
-  - platform: template
-    name: "wifi_led_off"
-    on_press:
-      lambda: id(core300s_ID)->wifi_led_off();
-  - platform: template
-    name: "wifi_led_flash"
-    on_press:
-      lambda: id(core300s_ID)->wifi_led_flash();   
-  - platform: template
-    name: "wifi_led_on"
-    on_press:
-      lambda: id(core300s_ID)->wifi_led_on();      
-  - platform: template
-    name: "Filter Led On"
-    on_press:
-      lambda: id(core300s_ID)->filter_led_on();   
-  - platform: template
-    name: "Filter Led Off"
-    on_press:
-      lambda: id(core300s_ID)->filter_led_off();                                
-  - platform: template
-    name: "Fan Auto PPM"
-    on_press:
-      lambda: id(core300s_ID)->set_fan_auto_ppm();      
-  - platform: template
-    name: "Fan Auto PPM Quiet"
-    on_press:
-      lambda: id(core300s_ID)->set_fan_auto_ppmQuiet();   
-  - platform: template
-    name: "Fan Auto RoomSize"
-    on_press:
-      lambda: id(core300s_ID)->set_fan_auto_area(); 
-
+    id: max_filter_months
+    entity_category:  config
+    icon: mdi:air-filter
+    name: "${upper_name} filter life time (months)"
+    optimistic: true
+    min_value: 1
+    max_value: 12
+    initial_value: 6
+    restore_value: true
+    step: 1
 interval:
+  - interval: 60s
+    then:
+      script.execute: update_filter
   - interval: 1s
     then:
-      if:
-        condition:
-          wifi.connected:
-        then:
-          - lambda: id(core300s_ID)->wifi_led_on();  
-        else:
-          - lambda: id(core300s_ID)->wifi_led_off();  
+      - if:
+          condition:
+            wifi.connected:
+          then:
+            - lambda: id(core300s_ID)->wifi_led_on();  
+          else:
+            - lambda: id(core300s_ID)->wifi_led_off();  
+script:
+  - id: update_filter
+    then:
+      - lambda: |-
+          bool power = (id(fan_power).state == "On");
+          if(power){
+            auto speed_text = id(fan_speed).state;
+            auto cfm = 0;
+            if (speed_text == "Off")    cfm =     0;
+            if (speed_text == "Low")    cfm =    60;
+            if (speed_text == "Medium") cfm =    80;
+            if (speed_text == "High")   cfm =   141;
+            if (speed_text == "Sleep")  cfm =    37;
+            id(cfm_min_used) += cfm;
+            id(run_time_min) += 1;
+          }
+
+  - id: map_to_template
+    mode: restart
+    then:
+      - delay: 40ms 
+      - lambda: |-
+          
+          bool power_template = id(temp_fan).state;
+          auto speed_template = id(temp_fan).speed;
+          auto mode_template = id(temp_fan).preset_mode;
+          
+          bool power = (id(fan_power).state == "On");
+          auto speed_text = id(fan_speed).state;
+          auto mode_text = id(fan_mode).state;
+          //map text speed back to int
+          auto speed = 0;
+          if (speed_text == "Off") speed =  0;
+          if (speed_text == "Low") speed = 1;
+          if (speed_text == "Medium") speed = 2;
+          if (speed_text == "High") speed =  3;
+          if (speed_text == "Sleep") speed =  1;
+          // only if different !!!
+          if(power_template!=power || speed_template != speed || mode_template!=mode_text){
+            if(!power){
+              auto call_off = id(temp_fan).turn_off();
+              call_off.perform();
+            }else{
+              auto callSpeed = id(temp_fan).turn_on();
+              callSpeed.set_speed(speed);
+              callSpeed.perform(); 
+              auto call = id(temp_fan).turn_on();
+              call.set_preset_mode(mode_text.c_str());
+              call.perform(); 
+            }      
+          }
+  - id: update_levoit_from_template_power
+    mode: restart
+    then:
+      - delay: 20ms 
+      - lambda: |-
+          bool power_fan = (id(fan_power).state == "On");
+          bool power_template = id(temp_fan).state;
+          if(power_fan!=power_template){
+            if(!power_template){
+              id(core300s_ID)->power_off();
+            }else{
+              id(core300s_ID)->power_on();
+            }
+          }
+  - id: update_levoit_from_template_speed
+    mode: restart
+    then:
+      - delay: 30ms 
+      - lambda: |-
+          //
+          auto speed_text = id(fan_speed).state;
+          //map text speed back to int
+          auto speed_fan = 0;
+          if (speed_text == "Off") speed_fan =  0;
+          if (speed_text == "Low") speed_fan = 1;
+          if (speed_text == "Medium") speed_fan = 2;
+          if (speed_text == "High") speed_fan =  3;
+          if (speed_text == "Sleep") speed_fan =  1;
+          auto speed_template = id(temp_fan).speed;
+          if( speed_fan!=speed_template){
+            if(speed_template==3) id(core300s_ID)->set_fan_manual_high();
+            if(speed_template==2) id(core300s_ID)->set_fan_manual_medium();
+            //not in sleep?
+            auto mode_text = id(fan_mode).state;
+            if(mode_text!="Sleep" && speed_template==1) id(core300s_ID)->set_fan_manual_low();
+          }
+  - id: update_levoit_from_template_preset
+    mode: restart
+    then:
+      - delay: 10ms 
+      - lambda: |-
+          //
+          auto mode_text = id(fan_mode).state;
+          auto mode_template = id(temp_fan).preset_mode;
+          if( mode_text!=mode_template && mode_template!=""){
+            id(core300s_ID)->power_on();
+            if(mode_template=="Manual") id(core300s_ID)->set_fan_mode_manual();
+            if(mode_template=="Auto") id(core300s_ID)->set_fan_mode_auto();
+            if(mode_template=="Sleep") id(core300s_ID)->set_fan_mode_sleep();
+          }                    
+binary_sensor:
+  - platform: template
+    id: replace_filter
+    name: ${upper_name} Replace filter
+    device_class: smoke
+    icon: mdi:air-filter
+    trigger_on_initial_state: true
+    condition:
+      sensor.in_range:
+        id: filter_life_left
+        below: ${filterReplaceBelowPercent} 
+    on_state_change:
+      then:
+      - logger.log:
+          format: "Old state was %s"
+          args: ['x_previous.has_value() ? ONOFF(x_previous.value()) : "Unknown"']
+      - logger.log:
+          format: "New state is %s"
+          args: ['x.has_value() ? ONOFF(x.value()) : "Unknown"']
+      - delay: 500ms
+      - lambda: |-
+          auto newVal = x.value();
+          if(!x_previous.has_value()|| x_previous.value() != newVal){
+            if(newVal){
+              id(core300s_ID)->filter_led_on(); 
+            }else{
+              id(core300s_ID)->filter_led_off(); 
+            }
+          }     
+switch:
+  - platform: template
+    name: "Display Light"
+    icon: mdi:lightbulb
+    id: template_display_lit
+    entity_category:  config
+    turn_on_action:
+      - lambda: |- 
+          auto fan_ds = (id(display_light_on).state =="On");
+          if(!fan_ds) id(core300s_ID)->display_on(); 
+
+    turn_off_action:
+      - lambda: |- 
+          auto fan_ds = (id(display_light_on).state =="On");
+          if(fan_ds) id(core300s_ID)->display_off(); 
+           
+  - platform: template
+    name: "Display Locked"
+    icon: mdi:lock
+    id: template_display_locked
+    entity_category:  config
+    turn_on_action:
+      - lambda: |- 
+          auto fan_ds = (id(display_locked).state =="Unlocked");
+          if(fan_ds) id(core300s_ID)->lock_display();
+    turn_off_action:
+      - lambda: |- 
+          auto fan_ds = (id(display_locked).state =="Locked");
+          if(fan_ds) id(core300s_ID)->unlock_display();    
+          
+fan:
+  - platform: template
+    name: "${upper_name} Fan"
+    id: temp_fan
+    speed_count: 3
+    preset_modes:
+      - Manual
+      - Auto
+      - Sleep
+    on_state:
+      - script.execute: update_levoit_from_template_power
+    on_speed_set:
+      - script.execute: update_levoit_from_template_speed
+    on_preset_set:
+      - script.execute: update_levoit_from_template_preset

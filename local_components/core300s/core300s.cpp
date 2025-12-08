@@ -105,7 +105,7 @@ void Core300sComponent::process_packet()  {
     char buf[32];        
     unsigned int packet_type=0;
     packet_type = (rx_buf[6] << 16) + (rx_buf[7] << 8) + rx_buf[8];
-    ESP_LOGD(TAG, "process_packet type %X", packet_type);
+    //ESP_LOGD(TAG, "process_packet type %X", packet_type);
     
     if(rx_buf[1]==0x22)
         acknowledge_packet();
