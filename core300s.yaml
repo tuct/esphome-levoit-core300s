@@ -90,7 +90,7 @@ sensor:
     unit_of_measurement: '%'
     lambda: |-
       int cfmMin = id(cfm_min_used);
-      if(cfmMin==0) return 1.0;
+      if(cfmMin==0) return 100.0;
       int maxMonths = (int)id(max_filter_months).state;
       int maxCFMMin = maxMonths*30*60*24*141; 
       float percent = (1 - ((float)min(cfmMin,maxCFMMin)/maxCFMMin))*100;
